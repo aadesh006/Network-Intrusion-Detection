@@ -15,13 +15,13 @@ This project trains classifiers on flow-level network traffic features
    (DoS Hulk, PortScan, DDoS, Brute Force, Web Attacks, Bot, Infiltration,
    Heartbleed, etc.).
 
-The dataset spans 5 days of network activity and ~2.8 million labeled flows,
-with a realistic class imbalance (the vast majority of traffic is benign,
-while some attack types like Heartbleed have only a handful of examples).
-Handling this imbalance — via stratified splitting, `class_weight`/sample
-weighting, grouping ultra-rare classes, and using macro-F1 / per-class
-precision-recall rather than raw accuracy — is a core part of the
-methodology, not an afterthought.
+The dataset spans 5 days of network activity and ~2.5 million labeled flows
+after cleaning, with a realistic class imbalance (the vast majority of
+traffic is benign, while some attack types like Heartbleed have only a
+handful of examples). Handling this imbalance — via stratified splitting,
+`class_weight`/sample weighting, grouping ultra-rare classes, and using
+macro-F1 / per-class precision-recall rather than raw accuracy — is a core
+part of the methodology, not an afterthought.
 
 ## Project structure
 
@@ -34,7 +34,7 @@ network-intrusion-detection/
 │   ├── 01_eda_and_preprocessing.ipynb
 │   └── 02_modeling_and_evaluation.ipynb
 ├── src/
-│   ├── data_loader.py    # loads & concatenates raw CSVs
+│   ├── data_loader.py    # loads & concatenates raw CSVs, fixes label encoding
 │   ├── preprocessing.py  # cleaning, label encoding, train/test split + scaling
 │   └── evaluation.py     # plotting & metric helpers
 ├── outputs/
@@ -54,9 +54,10 @@ pip install -r requirements.txt
 
 ## Getting the data
 
-1. Go to https://www.unb.ca/cic/datasets/ids-2017.html and download the
-   **"MachineLearningCSV"** (also distributed as `GeneratedLabelledFlows`)
-   archive — 8 CSV files, one per day/scenario:
+1. Go to https://www.unb.ca/cic/datasets/ids-2017.html (or the
+   [CIC research portal](https://cicresearch.ca/CICDataset/CIC-IDS-2017/browse.php?p=CIC-IDS-2017))
+   and download **`MachineLearningCSV.zip`** — 8 CSV files, one per
+   day/scenario:
    - `Monday-WorkingHours.pcap_ISCX.csv`
    - `Tuesday-WorkingHours.pcap_ISCX.csv`
    - `Wednesday-workingHours.pcap_ISCX.csv`
@@ -65,15 +66,15 @@ pip install -r requirements.txt
    - `Friday-WorkingHours-Morning.pcap_ISCX.csv`
    - `Friday-WorkingHours-Afternoon-PortScan.pcap_ISCX.csv`
    - `Friday-WorkingHours-Afternoon-DDos.pcap_ISCX.csv`
-2. Extract all 8 CSVs into `data/raw/`.
+2. Extract all 8 CSVs directly into `data/raw/` (not into a subfolder).
 
 ## Running the pipeline
 
 1. **`notebooks/01_eda_and_preprocessing.ipynb`**
    Loads the raw CSVs, explores class distributions and data quality
-   issues (infinite values, duplicates, zero-variance columns), cleans the
-   data, builds binary and multiclass label columns, and saves a processed
-   parquet to `data/processed/`.
+   issues (infinite values, duplicates, zero-variance columns, mojibake in
+   attack labels), cleans the data, builds binary and multiclass label
+   columns, and saves a processed parquet to `data/processed/`.
 
 2. **`notebooks/02_modeling_and_evaluation.ipynb`**
    Trains and compares Logistic Regression, Random Forest, and XGBoost on
@@ -85,6 +86,90 @@ pip install -r requirements.txt
    Interactive dashboard: explore the dataset's class balance, run the
    trained models on random sample flows, and manually tweak feature values
    to see how predictions change.
+
+## Results
+
+After cleaning (removing rows with infinite values from `Flow Bytes/s` /
+`Flow Packets/s`, dropping duplicates and zero-variance columns), the
+dataset contains **2,520,798 flows across 69 features**.
+
+### Binary classification (BENIGN vs ATTACK)
+
+| Model               | Accuracy | Macro F1 | ROC-AUC | Train time |
+|---------------------|---------:|---------:|--------:|-----------:|
+| Logistic Regression | 0.940    | 0.905    | 0.988   | 83.2s      |
+| Random Forest       | 0.999    | 0.998    | 1.000   | 235.0s     |
+| XGBoost             | 0.999    | 0.998    | 1.000   | 29.3s      |
+
+Even a linear baseline achieves 94% accuracy and 0.99 ROC-AUC — attack vs
+benign traffic is largely linearly separable on flow-level statistics.
+Random Forest and XGBoost both reach ~99.9% accuracy and 0.998 macro-F1.
+**XGBoost matches Random Forest's accuracy in roughly 1/8th the training
+time** (29s vs 235s), making it the clear choice if this were deployed.
+
+### Multiclass classification (attack category)
+
+| Model         | Accuracy | Macro F1 | Weighted F1 | Train time |
+|---------------|---------:|---------:|------------:|-----------:|
+| Random Forest | 0.998    | 0.876    | 0.998       | 227.0s     |
+| XGBoost       | 0.999    | 0.902    | 0.999       | 318.4s     |
+
+High-volume attack types — DDoS, DoS Hulk, DoS GoldenEye/Slowhttptest/slowloris,
+PortScan, FTP-Patator, SSH-Patator — are all classified with F1 ≥ 0.99 by
+both models. The gap between accuracy (~0.999) and macro-F1 (~0.88-0.90) is
+driven entirely by two classes:
+
+- **Bot**: recall is ~0.99 for both models (almost all real Bot traffic is
+  caught), but precision is only **0.37 (Random Forest) vs 0.70 (XGBoost)**
+  — the models, especially RF, over-predict "Bot" on traffic that isn't
+  actually Bot. XGBoost handling this nearly twice as well as RF was the
+  most interesting single comparison in the project.
+- **Web Attack – Brute Force / Web Attack – XSS**: F1 of ~0.70-0.78 and
+  ~0.45-0.46 respectively. The confusion matrix shows these two classes are
+  confused with *each other* far more than with anything else (up to 45% of
+  XSS flows predicted as Brute Force, and vice versa).
+
+### Feature importance — what changes between binary and multiclass
+
+For **binary classification**, the top features are all packet-size
+statistics: `Packet Length Std`, `Bwd Packet Length Std`,
+`Packet Length Variance`, `Average Packet Size`. This makes intuitive
+sense — the model is essentially asking "does this traffic look
+statistically normal?" Benign traffic has naturally varied packet sizes
+(driven by humans and diverse applications); attack traffic is
+machine-generated and repetitive, so packet-size variance collapses.
+
+For **multiclass classification**, `Destination Port` becomes by far the
+single most important feature (more than double the second-ranked
+feature), with TCP-stack features (`Init_Win_bytes_backward/forward`) and
+inter-arrival-time statistics also rising in importance. This reflects that
+*which port is being attacked* is a strong proxy for *what kind of attack
+it is* — FTP-Patator targets port 21, SSH-Patator targets port 22, and
+Web Attacks / DoS Hulk / DoS GoldenEye target port 80/443.
+
+### Why Web Attack subtypes are hard to separate
+
+This is the most informative finding in the project. CICFlowMeter computes
+purely statistical features over packet timing, size, and counts — it never
+inspects payload content. The actual difference between a brute-force login
+attempt and an XSS injection attempt against the same web server lies in the
+HTTP request *content* (`POST /login` repeated many times vs. a request
+containing `<script>`), not in flow-level shape. Two semantically very
+different attacks against the same service can produce nearly identical
+flow statistics. This isn't really a model failure — it's a fundamental
+limitation of the feature representation, and it's the kind of thing a
+production system would need deep packet inspection or payload-aware
+features to resolve.
+
+### "Other" class caveat
+
+Attack types with fewer than 200 total samples (Heartbleed, Infiltration,
+SQL Injection) were grouped into an `"Other"` class so stratified splitting
+remained possible. This class has only 13 samples in the test set, so its
+reported metrics (62-85% F1 depending on model) are statistically noisy and
+shouldn't be over-interpreted. Notably, 23% of "Other" flows were predicted
+as BENIGN — plausible, since Infiltration attacks are specifically designed
+to mimic normal traffic.
 
 ## Methodology notes
 
@@ -107,11 +192,11 @@ pip install -r requirements.txt
 ## Caveats
 
 CICIDS2017 traffic was generated in a controlled university testbed over a
-fixed time window. Absolute performance numbers (which are typically very
-high, >99% on several attack types) won't transfer directly to a production
-network with different traffic patterns and attack tooling — but the
-*methodology* (handling imbalance, evaluation choices, feature importance
-analysis) generalizes to real-world intrusion detection systems.
+fixed time window. Absolute performance numbers won't transfer directly to
+a production network with different traffic patterns and attack tooling —
+but the *methodology* (handling imbalance, evaluation choices, feature
+importance analysis, and identifying where the feature representation
+itself breaks down) generalizes to real-world intrusion detection systems.
 
 ## Credits
 

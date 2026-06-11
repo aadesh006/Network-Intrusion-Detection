@@ -36,6 +36,24 @@ def _clean_columns(df: pd.DataFrame) -> pd.DataFrame:
     return df
 
 
+def _fix_label_text(df: pd.DataFrame, label_col: str = "Label") -> pd.DataFrame:
+    """
+    The 'Web Attack' labels in the raw CSVs contain a Windows-1252
+    en-dash (0x96) which, when the file is read as latin-1, becomes
+    a mojibake sequence (e.g. 'Web Attack ï¿½ Brute Force'). Normalize
+    these to a plain hyphen so labels are clean and consistent.
+    """
+    if label_col in df.columns:
+        df[label_col] = (
+            df[label_col]
+            .str.replace("\ufffd", "-", regex=False)  # U+FFFD replacement char
+            .str.replace("\x96", "-", regex=False)
+            .str.replace("Web Attack -", "Web Attack -", regex=False)
+            .str.strip()
+        )
+    return df
+
+
 def load_cicids2017(raw_dir: str | Path = RAW_DIR, verbose: bool = True) -> pd.DataFrame:
     """
     Load every CSV in `raw_dir`, clean column names, and concatenate
@@ -64,6 +82,7 @@ def load_cicids2017(raw_dir: str | Path = RAW_DIR, verbose: bool = True) -> pd.D
             print(f"Loading {os.path.basename(f)} ...")
         df = pd.read_csv(f, low_memory=False, encoding="latin1")
         df = _clean_columns(df)
+        df = _fix_label_text(df)
         df["source_file"] = os.path.basename(f)
         frames.append(df)
 

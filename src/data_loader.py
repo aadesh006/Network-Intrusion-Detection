@@ -46,6 +46,7 @@ def _fix_label_text(df: pd.DataFrame, label_col: str = "Label") -> pd.DataFrame:
     if label_col in df.columns:
         df[label_col] = (
             df[label_col]
+            .str.replace("ï¿½", "-", regex=False)     # UTF-8 en-dash misread as latin-1 (3 chars)
             .str.replace("\ufffd", "-", regex=False)  # U+FFFD replacement char
             .str.replace("\x96", "-", regex=False)
             .str.replace("Web Attack -", "Web Attack -", regex=False)
